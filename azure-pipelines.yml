@@ -1,0 +1,107 @@
+
+variables:
+  MAVEN_CACHE_FOLDER: $(HOME)/.m2/repository
+  MAVEN_OPTS: '-Dmaven.repo.local=$(MAVEN_CACHE_FOLDER)'
+  npm_config_cache: $(HOME)/.npm
+pool:
+  vmImage: ubuntu-latest
+
+schedules:
+  - cron: "00 21 * * *"  # Runs at 21:00 PM GMT every day
+    displayName: "Daily 21:00 PM Run"
+    branches:
+      include:
+      - gas-scan-testing
+    always: true  # Always run the pipeline, even if there are no changes  
+steps:
+  - checkout: self
+    clean: true
+    fetchDepth: 3
+    persistCredentials: true
+
+  - task: AdvancedSecurity-Codeql-Init@1
+    inputs:
+      languages: 'java, javascript'
+      querysuite: 'security-and-quality'  
+         
+  # Set up maven repo cache2
+  - task: Cache@2
+    displayName: Cache Maven local repo
+    inputs:
+      key: maven | "$(Agent.OS)" | **/pom.xml
+      path: $(MAVEN_CACHE_FOLDER)
+      restoreKeys: |
+        maven | "$(Agent.OS)"
+        maven
+  # Perform AEM maven build
+  - task: Maven@4
+    displayName: AEM Build
+    inputs:
+      goals: '-B package'
+      publishJUnitResults: false
+      mavenOpts: '-Xmx2048m $(MAVEN_OPTS)'
+       
+  # Set up npm cache
+  - task: Cache@2
+    displayName: Cache npm
+    inputs:
+      key: npm | "$(Agent.OS)" | ui.frontend/package-lock.json
+      path: $(npm_config_cache)
+      restoreKeys: |
+        npm | "$(Agent.OS)"
+        npm
+  # Perform npm install
+  - task: Npm@1
+    displayName: npm install
+    inputs:
+      command: custom
+      workingDir: ./ui.frontend
+      verbose: false
+      customCommand: ci --cache $(npm_config_cache)
+  - task: Npm@1
+    displayName: npm install Vue App
+    inputs:
+      command: custom
+      workingDir: ./ui.frontend/vue-app
+      verbose: false
+      customCommand: ci --cache $(npm_config_cache)   
+  # Perform npm build
+  - task: Npm@1
+    displayName: npm build
+    inputs:
+      command: custom
+      workingDir: ./ui.frontend
+      verbose: false
+      customCommand: run build
+  # Perform npm test
+  - task: Npm@1
+    displayName: npm test
+    inputs:
+      command: custom
+      workingDir: ./ui.frontend
+      verbose: false
+      customCommand: run test
+  # Add dependency scanning and CodeQL analysis after build steps
+  - task: AdvancedSecurity-Dependency-Scanning@1
+    displayName: 'Dependency Scanning'
+
+  - task: AdvancedSecurity-Codeql-Analyze@1
+
+  - script: |
+      mkdir -p $(Build.ArtifactStagingDirectory)/sarif-files
+    displayName: 'Create SARIF Files Directory'
+
+  - script: |
+      mv /home/vsts/work/_temp/advancedsecurity.codeql/out/*.sarif $(Build.ArtifactStagingDirectory)/sarif-files/
+    displayName: 'Move SARIF Files'
+
+  - task: PublishBuildArtifacts@1
+    inputs:
+      pathToPublish: '$(Build.ArtifactStagingDirectory)/sarif-files'
+      artifactName: 'CodeAnalysisLogs'
+    displayName: 'Publish SARIF Files'
+
+  - task: AdvancedSecurity-Publish@1
+    displayName: 'Publish SARIF Results'
+    inputs:
+      SarifsInputDirectory: '$(Build.ArtifactStagingDirectory)/sarif-files'
